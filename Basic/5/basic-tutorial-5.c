@@ -24,6 +24,13 @@ typedef struct _CustomData {
 	gint64 duration; /* total duration of clip */
 } CustomData;
 
+/* stream details table IDs*/
+enum {
+	COL_STREAM_NAME = 0,
+	COL_STREAM_DETAILS,
+	NUM_COLS
+};
+
 /*
  * @brief callback when GTK creates physical window
  *        retrive handle and provide to gstreamer through XOverlay interface
@@ -66,6 +73,47 @@ static void pause_cb(GtkButton *button, CustomData *data) {
  * */
 static void stop_cb(GtkButton *button, CustomData *data) {
 	gst_element_set_state(data->playbin2, GST_STATE_READY);
+}
+
+/* @brief update stream of playbin2 based on stream name*/
+static inline void stream_set(gchar* stream_name, CustomData *data) {
+	gchar *o_brace, *c_brace;
+	gchar *tstr, *property;
+	gint tint, id;
+	o_brace = g_strstr_len(stream_name, strlen(stream_name), "[");
+	c_brace = g_strstr_len(stream_name, strlen(stream_name), "]");
+	tint = c_brace - o_brace;
+	tstr = g_new(gchar, tint);
+	g_strlcpy(tstr, o_brace + 1, tint);
+	id = atoi(tstr);
+	g_free(tstr);
+	*o_brace = '\0';
+	tstr = g_ascii_strdown(stream_name, strlen(stream_name));
+	property = g_strdup_printf("current-%s", tstr);
+	g_free(tstr);
+
+	g_object_get(data->playbin2, property, &tint, NULL);
+	if (tint != id) {
+		g_print("Selecting %s : %d.\n", property, id);
+		g_object_set(data->playbin2, property, id, NULL);
+	}
+	g_free(property);
+}
+
+/* @brief callback when tree view is double-clicked : select corrosponding stream*/
+static void stream_select_cb(GtkTreeView *tree_view, GtkTreePath *path, GtkTreeViewColumn* col, CustomData *data) {
+	GtkTreeModel *model;
+	GtkTreeIter iter;
+
+	model = gtk_tree_view_get_model(tree_view);
+	if (gtk_tree_model_get_iter(model, &iter, path)) {
+		gchar *stream_name;
+		gtk_tree_model_get(model, &iter, COL_STREAM_NAME, &stream_name, -1);
+
+		g_print("Double clicked row : %s\n", stream_name);
+		stream_set(stream_name, data);
+		g_free(stream_name);
+	}
 }
 
 /*
@@ -119,6 +167,7 @@ static void create_ui(CustomData *data) {
 	GtkWidget *main_hbox; /* hold video window & streaminfo widget */
 	GtkWidget *controls; /* hold buttons & slider */
 	GtkWidget *play_button, *pause_button, *stop_button;
+	GtkCellRenderer     *renderer;
 
 	main_window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
 	g_signal_connect(G_OBJECT(main_window), "delete-event", G_CALLBACK(delete_event_cb), data);
@@ -141,8 +190,17 @@ static void create_ui(CustomData *data) {
 	gtk_scale_set_draw_value(GTK_SCALE(data->slider), 0);
 	data->slider_update_signal_id = g_signal_connect (G_OBJECT (data->slider), "value-changed", G_CALLBACK (slider_cb), data);
 
-	data->streams_list = gtk_text_view_new();
-	gtk_text_view_set_editable (GTK_TEXT_VIEW (data->streams_list), FALSE);
+	data->streams_list = gtk_tree_view_new();
+	renderer = gtk_cell_renderer_text_new ();
+	gtk_cell_renderer_set_fixed_size(renderer, 15, -1);
+	gtk_tree_view_insert_column_with_attributes(GTK_TREE_VIEW(data->streams_list),
+			-1, "Stream Name", renderer, "text", COL_STREAM_NAME, NULL);
+	renderer = gtk_cell_renderer_text_new ();
+	gtk_cell_renderer_set_fixed_size(renderer, 15, -1);
+	gtk_tree_view_insert_column_with_attributes(GTK_TREE_VIEW(data->streams_list),
+			-1, "Stream Details", renderer, "text", COL_STREAM_DETAILS, NULL);
+	g_signal_connect(data->streams_list, "row-activated", G_CALLBACK(stream_select_cb), data);
+	//gtk_text_view_set_editable (GTK_TEXT_VIEW (data->streams_list), FALSE);
 
 	controls = gtk_hbox_new (FALSE, 0);
 	gtk_box_pack_start (GTK_BOX (controls), play_button, FALSE, FALSE, 2);
@@ -150,12 +208,9 @@ static void create_ui(CustomData *data) {
 	gtk_box_pack_start (GTK_BOX (controls), stop_button, FALSE, FALSE, 2);
 	gtk_box_pack_start (GTK_BOX (controls), data->slider, TRUE, TRUE, 2);
 
-	main_hbox = gtk_hbox_new (FALSE, 0);
-	gtk_box_pack_start (GTK_BOX (main_hbox), video_window, TRUE, TRUE, 0);
-	gtk_box_pack_start (GTK_BOX (main_hbox), data->streams_list, FALSE, FALSE, 2);
-
 	main_box = gtk_vbox_new (FALSE, 0);
-	gtk_box_pack_start (GTK_BOX (main_box), main_hbox, TRUE, TRUE, 0);
+	gtk_box_pack_start (GTK_BOX (main_box), video_window, TRUE, TRUE, 0);
+	gtk_box_pack_start (GTK_BOX (main_box), data->streams_list, FALSE, FALSE, 2);
 	gtk_box_pack_start (GTK_BOX (main_box), controls, FALSE, FALSE, 0);
 	gtk_container_add (GTK_CONTAINER (main_window), main_box);
 	gtk_window_set_default_size (GTK_WINDOW (main_window), 640, 480);
@@ -245,15 +300,14 @@ static void state_changed_cb (GstBus *bus, GstMessage *msg, CustomData *data) {
 static void analyze_streams (CustomData *data) {
 	gint i;
 	GstTagList *tags;
-	gchar *str, *total_str;
+	gchar *str_name, *str_details;
 	guint rate;
 	gint n_video, n_audio, n_text;
-	GtkTextBuffer *text;
 
-	/* Clean current contents of the widget */
-	text = gtk_text_view_get_buffer (GTK_TEXT_VIEW (data->streams_list));
-	gtk_text_buffer_set_text (text, "", -1);
+	GtkListStore *store;
+	GtkTreeIter iter;
 
+	store = gtk_list_store_new(NUM_COLS, G_TYPE_STRING, G_TYPE_STRING);
 	/* Read some properties */
 	g_object_get (data->playbin2, "n-video", &n_video, NULL);
 	g_object_get (data->playbin2, "n-audio", &n_audio, NULL);
@@ -264,14 +318,16 @@ static void analyze_streams (CustomData *data) {
 		/* Retrieve the stream's video tags */
 		g_signal_emit_by_name (data->playbin2, "get-video-tags", i, &tags);
 		if (tags) {
-			total_str = g_strdup_printf ("video stream %d:\n", i);
-			gtk_text_buffer_insert_at_cursor (text, total_str, -1);
-			g_free (total_str);
-			gst_tag_list_get_string (tags, GST_TAG_VIDEO_CODEC, &str);
-			total_str = g_strdup_printf ("  codec: %s\n", str ? str : "unknown");
-			gtk_text_buffer_insert_at_cursor (text, total_str, -1);
-			g_free (total_str);
-			g_free (str);
+			str_name = g_strdup_printf("VIDEO[%d]", i);
+			str_details = gst_tag_list_to_string (tags);
+			/*Fill stream details*/
+			gtk_list_store_append (store, &iter);
+			gtk_list_store_set (store, &iter,
+					COL_STREAM_NAME, str_name,
+					COL_STREAM_DETAILS, str_details,
+					-1);
+			g_free(str_name);
+			g_free(str_details);
 			gst_tag_list_free (tags);
 		}
 	}
@@ -281,26 +337,16 @@ static void analyze_streams (CustomData *data) {
 		/* Retrieve the stream's audio tags */
 		g_signal_emit_by_name (data->playbin2, "get-audio-tags", i, &tags);
 		if (tags) {
-			total_str = g_strdup_printf ("\naudio stream %d:\n", i);
-			gtk_text_buffer_insert_at_cursor (text, total_str, -1);
-			g_free (total_str);
-			if (gst_tag_list_get_string (tags, GST_TAG_AUDIO_CODEC, &str)) {
-				total_str = g_strdup_printf ("  codec: %s\n", str);
-				gtk_text_buffer_insert_at_cursor (text, total_str, -1);
-				g_free (total_str);
-				g_free (str);
-			}
-			if (gst_tag_list_get_string (tags, GST_TAG_LANGUAGE_CODE, &str)) {
-				total_str = g_strdup_printf ("  language: %s\n", str);
-				gtk_text_buffer_insert_at_cursor (text, total_str, -1);
-				g_free (total_str);
-				g_free (str);
-			}
-			if (gst_tag_list_get_uint (tags, GST_TAG_BITRATE, &rate)) {
-				total_str = g_strdup_printf ("  bitrate: %d\n", rate);
-				gtk_text_buffer_insert_at_cursor (text, total_str, -1);
-				g_free (total_str);
-			}
+			str_name = g_strdup_printf("AUDIO[%d]", i);
+			str_details = gst_tag_list_to_string (tags);
+			/*Fill stream details*/
+			gtk_list_store_append (store, &iter);
+			gtk_list_store_set (store, &iter,
+					COL_STREAM_NAME, str_name,
+					COL_STREAM_DETAILS, str_details,
+					-1);
+			g_free(str_name);
+			g_free(str_details);
 			gst_tag_list_free (tags);
 		}
 	}
@@ -310,18 +356,23 @@ static void analyze_streams (CustomData *data) {
 		/* Retrieve the stream's subtitle tags */
 		g_signal_emit_by_name (data->playbin2, "get-text-tags", i, &tags);
 		if (tags) {
-			total_str = g_strdup_printf ("\nsubtitle stream %d:\n", i);
-			gtk_text_buffer_insert_at_cursor (text, total_str, -1);
-			g_free (total_str);
-			if (gst_tag_list_get_string (tags, GST_TAG_LANGUAGE_CODE, &str)) {
-				total_str = g_strdup_printf ("  language: %s\n", str);
-				gtk_text_buffer_insert_at_cursor (text, total_str, -1);
-				g_free (total_str);
-				g_free (str);
-			}
+			str_name = g_strdup_printf("TEXT[%d]", i);
+			str_details = gst_tag_list_to_string (tags);
+			/*Fill stream details*/
+			gtk_list_store_append (store, &iter);
+			gtk_list_store_set (store, &iter,
+					COL_STREAM_NAME, str_name,
+					COL_STREAM_DETAILS, str_details,
+					-1);
+			g_free(str_name);
+			g_free(str_details);
 			gst_tag_list_free (tags);
 		}
 	}
+	GtkTreeModel *tree = GTK_TREE_MODEL (store);
+	gtk_tree_view_set_model (GTK_TREE_VIEW (data->streams_list), tree);
+	g_object_unref (tree);
+
 }
 
 /* This function is called when an "application" message is posted on the bus.
