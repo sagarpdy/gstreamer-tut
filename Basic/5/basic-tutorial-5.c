@@ -358,7 +358,7 @@ int main(int argc, char *argv[]) {
 	}
 
 	/* Set the URI to play */
-	g_object_set (data.playbin2, "uri", "http://docs.gstreamer.com/media/sintel_trailer-480p.webm", NULL);
+	g_object_set (data.playbin2, "uri", "http://docs.gstreamer.com/media/sintel_cropped_multilingual.webm", NULL);
 
 	/* Connect to interesting signals in playbin2 */
 	g_signal_connect (G_OBJECT (data.playbin2), "video-tags-changed", (GCallback) tags_cb, &data);
